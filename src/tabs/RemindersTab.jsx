@@ -1,24 +1,38 @@
-import { useState, useEffect, useCallback } from 'react'
-import { supabase } from '../supabase'
+import { useCallback, useEffect, useState } from 'react'
+import { supabase } from '../supabase.js'
 import Sheet from '../components/Sheet.jsx'
+import Toast from '../components/Toast.jsx'
+import {
+  IconSyringe, IconPill, IconBell, IconAlert, IconClock, IconPlus, IconPaw,
+} from '../components/Icons.jsx'
 import {
   daysUntil, relativeDays, fmtDate, todayStr, speciesMeta, UPCOMING_WINDOW_DAYS,
-} from '../constants'
+} from '../constants.js'
 
-// Severity bucket from days-until value
+// Severity bucket from days-until value.
 function bucket(days) {
-  if (days == null) return 'none'
+  if (days == null) return 'later'
   if (days < 0) return 'overdue'
   if (days <= 7) return 'soon'
   if (days <= UPCOMING_WINDOW_DAYS) return 'upcoming'
   return 'later'
 }
-const BADGE = { overdue: 'red', soon: 'amber', upcoming: 'sage', later: 'gray' }
+
+function BucketBadge({ b, due }) {
+  const Ic = b === 'overdue' ? IconAlert : IconClock
+  return (
+    <span className={`badge ${b}`}>
+      <Ic size={11} />
+      {relativeDays(due)}
+    </span>
+  )
+}
 
 export default function RemindersTab({ pets, onJump }) {
   const [items, setItems] = useState([])
   const [loading, setLoading] = useState(true)
   const [adding, setAdding] = useState(false)
+  const [toast, setToast] = useState(null)
 
   const petById = (id) => pets.find((p) => p.id === id)
 
@@ -35,86 +49,115 @@ export default function RemindersTab({ pets, onJump }) {
 
     const all = []
     ;(vax.data || []).forEach((v) =>
-      all.push({ key: 'vax-' + v.id, kind: 'Vaccine', label: v.name, due: v.next_due, pet_id: v.pet_id, icon: '💉' }))
+      all.push({ key: 'vax-' + v.id, kind: 'Vaccine', label: v.name, due: v.next_due, pet_id: v.pet_id, Ic: IconSyringe }))
     ;(meds.data || []).forEach((m) =>
-      all.push({ key: 'med-' + m.id, kind: 'Med refill', label: m.name, due: m.refill_due, pet_id: m.pet_id, icon: '💊' }))
+      all.push({ key: 'med-' + m.id, kind: 'Med refill', label: m.name, due: m.refill_due, pet_id: m.pet_id, Ic: IconPill }))
     ;(rem.data || []).forEach((r) =>
-      all.push({ key: 'rem-' + r.id, kind: 'Reminder', label: r.title, due: r.due_date, pet_id: r.pet_id, icon: '🔔', remId: r.id }))
+      all.push({ key: 'rem-' + r.id, kind: 'Reminder', label: r.title, due: r.due_date, pet_id: r.pet_id, Ic: IconBell, remId: r.id, repeat_days: r.repeat_days }))
 
     all.sort((a, b) => (a.due || '').localeCompare(b.due || ''))
-    setItems(all)
-    setLoading(false)
+    setItems(all); setLoading(false)
   }, [pets])
 
   useEffect(() => { load() }, [load])
 
-  const markDone = async (remId) => {
-    await supabase.from('reminders').update({ done: true }).eq('id', remId)
+  // Mark a custom reminder done. Auto-rolls forward if it has a repeat interval.
+  // Either way, surface an Undo toast so a misfire is recoverable (polish §4).
+  const markDone = async (item) => {
+    if (item.repeat_days) {
+      const next = new Date(item.due + 'T00:00:00')
+      next.setDate(next.getDate() + Number(item.repeat_days))
+      const nextStr = next.toISOString().slice(0, 10)
+      await supabase.from('reminders')
+        .update({ due_date: nextStr })
+        .eq('id', item.remId)
+      setToast({
+        message: `Done — rolled forward to ${fmtDate(nextStr)}`,
+        undo: async () => { await supabase.from('reminders').update({ due_date: item.due }).eq('id', item.remId); load() },
+      })
+    } else {
+      await supabase.from('reminders').update({ done: true }).eq('id', item.remId)
+      setToast({
+        message: 'Done',
+        undo: async () => { await supabase.from('reminders').update({ done: false }).eq('id', item.remId); load() },
+      })
+    }
     load()
   }
 
+  // ─── Empty: no pets ───
   if (pets.length === 0) {
     return (
-      <div className="empty">
-        <div className="big">🐾</div>
-        <p>No pets yet. Add Ren &amp; Mav&rsquo;s pets in the <b>Pets</b> tab to start tracking.</p>
-        <div className="spacer" />
-        <button className="btn primary" onClick={() => onJump('pets')}>Go to Pets</button>
+      <div className="tab-pad">
+        <div className="empty full">
+          <IconPaw size={44} />
+          <h3>No pets yet</h3>
+          <p>Add Mav &amp; Ren&rsquo;s pets to start tracking vaccines, meds, and grooming.</p>
+          <button className="btn primary" onClick={() => onJump('pets')}>Add a pet</button>
+        </div>
       </div>
     )
   }
 
-  const overdue = items.filter((i) => bucket(daysUntil(i.due)) === 'overdue')
-  const soon = items.filter((i) => bucket(daysUntil(i.due)) === 'soon')
+  const overdue  = items.filter((i) => bucket(daysUntil(i.due)) === 'overdue')
+  const soon     = items.filter((i) => bucket(daysUntil(i.due)) === 'soon')
   const upcoming = items.filter((i) => bucket(daysUntil(i.due)) === 'upcoming')
-  const later = items.filter((i) => bucket(daysUntil(i.due)) === 'later')
+  const later    = items.filter((i) => bucket(daysUntil(i.due)) === 'later')
 
   const Group = ({ title, list }) =>
     list.length === 0 ? null : (
-      <>
-        <div className="section-title">{title}</div>
-        <div className="card" style={{ padding: '4px 16px' }}>
+      <section className="col-2">
+        <div className="section-h-row">
+          <span className="section-sub">{title}</span>
+          <span className="muted sm mono">{list.length}</span>
+        </div>
+        <div className="card flush-list">
           {list.map((it) => {
             const pet = petById(it.pet_id)
             const b = bucket(daysUntil(it.due))
             return (
               <div className="row" key={it.key}>
-                <div className="avatar" aria-hidden>
+                <div className="avatar app-tint">
                   {pet?.photo_url
-                    ? <img src={pet.photo_url} className="avatar" alt="" />
-                    : speciesMeta(pet?.species).icon}
+                    ? <img src={pet.photo_url} alt="" />
+                    : <it.Ic size={20} />}
                 </div>
                 <div className="grow">
                   <div className="title">{it.label}</div>
                   <div className="sub">
-                    {pet?.name} · {it.kind} · {fmtDate(it.due)}
+                    {pet?.name || '—'} · {it.kind} · {fmtDate(it.due)}
                   </div>
                 </div>
-                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 6 }}>
-                  <span className={`badge ${BADGE[b]}`}>{relativeDays(it.due)}</span>
+                <div className="row-end">
+                  <BucketBadge b={b} due={it.due} />
                   {it.remId && (
-                    <button className="btn sm ghost" onClick={() => markDone(it.remId)}>Done</button>
+                    <button className="btn ghost sm" onClick={() => markDone(it)}>Done</button>
                   )}
                 </div>
               </div>
             )
           })}
         </div>
-      </>
+      </section>
     )
 
   return (
-    <>
-      <div className="btn-row" style={{ marginBottom: 4 }}>
-        <button className="btn primary block" onClick={() => setAdding(true)}>+ Add reminder</button>
+    <div className="tab-pad">
+      <div className="section-h-row">
+        <h2 className="section-h flush">Upcoming</h2>
+        <button className="btn ghost sm" onClick={() => setAdding(true)}>
+          <IconPlus size={14} /> Reminder
+        </button>
       </div>
 
       {loading ? (
-        <div className="loading">Loading&hellip;</div>
+        <div className="empty"><div className="big">⏳</div><p>Loading&hellip;</p></div>
       ) : items.length === 0 ? (
         <div className="empty">
           <div className="big">✓</div>
-          <p>All caught up — nothing due.</p>
+          <h3>All caught up</h3>
+          <p>Nothing due. Schedule a grooming or flea dose so it&rsquo;s on the books.</p>
+          <button className="btn primary" onClick={() => setAdding(true)}>Add a reminder</button>
         </div>
       ) : (
         <>
@@ -125,22 +168,45 @@ export default function RemindersTab({ pets, onJump }) {
         </>
       )}
 
-      {adding && (
-        <AddReminder pets={pets} onClose={() => setAdding(false)} onSaved={() => { setAdding(false); load() }} />
-      )}
-    </>
+      <AddReminder
+        open={adding} pets={pets}
+        onClose={() => setAdding(false)}
+        onSaved={() => { setAdding(false); load() }}
+      />
+
+      <Toast
+        toast={toast}
+        onUndo={() => toast?.undo?.()}
+        onDismiss={() => setToast(null)}
+      />
+    </div>
   )
 }
 
-function AddReminder({ pets, onClose, onSaved }) {
+function AddReminder({ open, pets, onClose, onSaved }) {
   const [petId, setPetId] = useState(pets[0]?.id || '')
   const [title, setTitle] = useState('')
   const [due, setDue] = useState(todayStr())
   const [repeat, setRepeat] = useState('')
   const [saving, setSaving] = useState(false)
 
+  // Reset form when opening
+  useEffect(() => {
+    if (open) {
+      setPetId(pets[0]?.id || '')
+      setTitle(''); setDue(todayStr()); setRepeat(''); setSaving(false)
+    }
+  }, [open, pets])
+
+  const QUICK = [
+    { label: 'Flea / tick',  repeat: 30 },
+    { label: 'Heartworm',    repeat: 30 },
+    { label: 'Nail trim',    repeat: 42 },
+    { label: 'Grooming',     repeat: 56 },
+  ]
+
   const save = async () => {
-    if (!title.trim()) return
+    if (!title.trim() || saving) return
     setSaving(true)
     await supabase.from('reminders').insert({
       pet_id: petId || null,
@@ -151,15 +217,15 @@ function AddReminder({ pets, onClose, onSaved }) {
     onSaved()
   }
 
-  const QUICK = [
-    { label: 'Flea / tick (monthly)', repeat: 30 },
-    { label: 'Heartworm (monthly)', repeat: 30 },
-    { label: 'Nail trim', repeat: 42 },
-    { label: 'Grooming', repeat: 56 },
-  ]
-
   return (
-    <Sheet title="Add reminder" onClose={onClose}>
+    <Sheet
+      open={open} onClose={onClose} title="Add reminder"
+      footer={
+        <button className="btn primary block cta-big" disabled={!title.trim() || saving} onClick={save}>
+          {saving ? 'Saving…' : 'Save reminder'}
+        </button>
+      }
+    >
       <div className="field">
         <label>Pet</label>
         <select className="select" value={petId} onChange={(e) => setPetId(e.target.value)}>
@@ -172,8 +238,8 @@ function AddReminder({ pets, onClose, onSaved }) {
           onChange={(e) => setTitle(e.target.value)} />
         <div className="chip-row" style={{ marginTop: 8 }}>
           {QUICK.map((q) => (
-            <button key={q.label} className="chip"
-              onClick={() => { setTitle(q.label.split(' (')[0]); setRepeat(String(q.repeat)) }}>
+            <button key={q.label} className="chip" type="button"
+              onClick={() => { setTitle(q.label); setRepeat(String(q.repeat)) }}>
               {q.label}
             </button>
           ))}
@@ -185,14 +251,12 @@ function AddReminder({ pets, onClose, onSaved }) {
           <input className="input" type="date" value={due} onChange={(e) => setDue(e.target.value)} />
         </div>
         <div className="field">
-          <label>Repeat every (days)</label>
+          <label>Repeats every</label>
           <input className="input" type="number" inputMode="numeric" value={repeat}
-            placeholder="optional" onChange={(e) => setRepeat(e.target.value)} />
+            placeholder="optional · days" onChange={(e) => setRepeat(e.target.value)} />
+          <div className="field-help">e.g. 30 for monthly</div>
         </div>
       </div>
-      <button className="btn primary block" disabled={saving || !title.trim()} onClick={save}>
-        {saving ? 'Saving…' : 'Save reminder'}
-      </button>
     </Sheet>
   )
 }
